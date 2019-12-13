@@ -218,7 +218,7 @@ function emitLiteral(parse) {
 }
 dispatch['Literal'] = emitLiteral;
 
-////////////////////////////////////////////////////////////////////////////////
+// /////////////////////////////////////////////////////////////////////////////
 // structured programming
 
 function emitForStatement(parse) {
@@ -257,34 +257,34 @@ function emitIfStatement(parse) {
 dispatch['IfStatement'] = emitIfStatement;
 
 function emitWhileStatement(parse) {
-  let test = genericEmit(parse.test)[0];
-  let body = genericEmit(parse.body);
+  const test = genericEmit(parse.test)[0];
+  const body = genericEmit(parse.body);
 
-  let result = ["block",
-                ["loop",
-                 ["if", ["i32.eqz", test],
-                  ["then", ["br", 2]]],
-                 ...body,
-                 ["br", 0]]];
+  const result = ['block',
+    ['loop',
+      ['if', ['i32.eqz', test],
+        ['then', ['br', 2]]],
+      ...body,
+      ['br', 0]]];
   return [result];
 }
 dispatch['WhileStatement'] = emitWhileStatement;
 
 function emitDoWhileStatement(parse) {
-  let test = genericEmit(parse.test)[0];
-  let body = genericEmit(parse.body);
+  const test = genericEmit(parse.test)[0];
+  const body = genericEmit(parse.body);
 
-  let result = ["block",
-                ["loop",
-                 ...body,
-                 ["if", ["i32.eqz", test],
-                  ["then", ["br", 2]]],
-                 ["br", 0]]];
+  const result = ['block',
+    ['loop',
+      ...body,
+      ['if', ['i32.eqz', test],
+        ['then', ['br', 2]]],
+      ['br', 0]]];
   return [result];
 }
 dispatch['DoWhileStatement'] = emitDoWhileStatement;
 
-//////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////
 
 // Everything is easy here, since all of our lvalues are identifiers
 // for now.
