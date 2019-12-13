@@ -29,8 +29,8 @@
 	/* WabtModule does this wrong, so */
 	"new-cap": "off",
 
-	/* This screws up mWabtModule does this wrong, so */
-	"new-cap": "off"
+	/* I want to define functions that won't be used */
+	"no-unused-vars": "warn"
 	
     }
 }

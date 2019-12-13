@@ -160,8 +160,19 @@ const binaryOperatorToWasmOp = {
   '*': 'i32.mul',
   '-': 'i32.sub',
   '+': 'i32.add',
-  '/': 'i32.div',
-  '%': 'i32.rem',
+  '/': 'i32.div_s',
+  '%': 'i32.rem_s',
+  '<=': 'i32.le_s',
+  '<': 'i32.lt_s',
+  '>=': 'i32.ge_s',
+  '>': 'i32.gt_s',
+  '===': 'i32.eq',
+  '!==': 'i32.ne',
+  '&': 'i32.and',
+  '|': 'i32.or',
+  '^': 'i32.xor',
+  '>>': 'i32.shr_s',
+  '<<': 'i32.shl_s',
 };
 
 function emitBinaryExpression(parse) {
@@ -206,12 +217,123 @@ function emitLiteral(parse) {
 }
 dispatch['Literal'] = emitLiteral;
 
-// ////////////////////////////////////////////////////////////////////////////
+function emitForStatement(parse) {
+  const initializer = genericEmit(parse.init);
+  const test = genericEmit(parse.test)[0];
+  const update = genericEmit(parse.update)[0];
+  const body = genericEmit(parse.body);
 
-compileFromWatURL('foo.wat')
-    .then((instance) => {
-      console.log(instance.exports.foo(2, 3), foo(2, 3));
-    });
+  const result = ['block',
+    ...initializer,
+    ['loop',
+      ['if', test,
+        ['then',
+          ...body,
+          ['drop', update],
+          ['br', 1]],
+        ['else',
+          ['br', 2]]]]];
+  return [result];
+}
+
+dispatch['ForStatement'] = emitForStatement;
+
+function emitIfStatement(parse) {
+  const test = genericEmit(parse.test)[0];
+  const then = genericEmit(parse.consequent);
+
+  const result = ['if', test,
+    ['then', ...then]];
+  if (parse.alternate) {
+    const elseBlock = genericEmit(parse.alternate);
+    result.push(['else', ...elseBlock]);
+  }
+  return [result];
+}
+dispatch['IfStatement'] = emitIfStatement;
+
+// Everything is easy here, since all of our lvalues are identifiers
+// for now.
+
+function emitAssignmentExpression(parse) {
+  const left = parse.left;
+  const name = '$' + left.name;
+  const right = genericEmit(parse.right)[0];
+  if (parse.operator === '=') {
+    if (left.type !== 'Identifier') {
+      throw new Error('Currently only know how to parse ' +
+                      'AssignmentExpression with identifier lvalues');
+    }
+    return [['local.set', name, right]];
+  } else {
+    const result = ['block', ['result', 'i32']];
+    const op = binaryOperatorToWasmOp[parse.operator.slice(0, -1)];
+
+    if (op === undefined) {
+      throw new Error(`Don't know what to do with ${parse.operator}`);
+    }
+
+    if (left.type !== 'Identifier') {
+      throw new Error('Currently only know how to parse ' +
+                      'AssignmentExpression with identifier lvalues');
+    }
+
+    result.push(['local.set', name, [op, ['local.get', name], right]],
+        ['local.get', name]);
+    return [result];
+  }
+}
+
+dispatch['AssignmentExpression'] = emitAssignmentExpression;
+
+function emitUpdateExpression(parse) {
+  const result = ['block', ['result', 'i32']];
+
+  if (parse.operator === '++') {
+    const argument = parse.argument;
+    if (argument.type !== 'Identifier') {
+      throw new Error('Currently only know how to parse ' +
+                      'AssignmentExpression with identifier lvalues');
+    }
+    const name = '$' + argument.name;
+    const inc = ['local.set', name,
+      ['i32.add', ['local.get', name], ['i32.const', 1]]];
+    if (parse.prefix) {
+      result.push(inc, ['local.get', name]);
+    } else {
+      result.push(['local.get', name], inc);
+    }
+  } else if (parse.operator === '--') {
+    const argument = parse.argument;
+    if (argument.type !== 'Identifier') {
+      throw new Error('Currently only know how to parse ' +
+                      'AssignmentExpression with identifier lvalues');
+    }
+    const name = '$' + argument.name;
+    const dec = ['local.set', name,
+      ['i32.sub', ['local.get', name], ['i32.const', 1]]];
+    if (parse.prefix) {
+      result.push(dec, ['local.get', name]);
+    } else {
+      result.push(['local.get', name], dec);
+    }
+  } else {
+    throw new Error('Currently only know about update expressions -- and ++');
+  }
+
+  return [result];
+}
+
+dispatch['UpdateExpression'] = emitUpdateExpression;
+
+function emitExpressionStatement(parse) {
+  const result = ['drop', genericEmit(parse.expression)[0]];
+  return [result];
+}
+
+dispatch['ExpressionStatement'] = emitExpressionStatement;
+
+// ////////////////////////////////////////////////////////////////////////////
 
 // let's assume that we only operate on i32s for now.
 function foo(a, b) {
@@ -221,3 +343,27 @@ function foo(a, b) {
 
 compileIntoWasmFunction(foo)
     .then((f) => console.log(foo(2, 3), f(2, 3)));
+
+function factorial(n) {
+  let result = 1;
+  for (let i = 1; i <= n; ++i) {
+    result *= i;
+  }
+  return result;
+}
+
+compileIntoWasmFunction(factorial)
+    .then((f) => console.log(factorial(10), f(10)));
+
+function halfFactorial(n) {
+  let result = 1;
+  for (let i = 1; i <= n; ++i) {
+    if (i % 2 === 1) {
+      result *= i;
+    }
+  }
+  return result;
+}
+
+compileIntoWasmFunction(halfFactorial)
+    .then((f) => console.log(halfFactorial(10), f(10)));
