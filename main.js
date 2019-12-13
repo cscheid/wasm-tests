@@ -32,6 +32,7 @@ function compileIntoWasmFunction(f) {
     ['export', `"${f.name}"`,
       ['func', '$' + f.name]]];
   const moduleText = printSExpr(moduleSExpr);
+  console.log(moduleText);
   const binaryWasm = wabt.parseWat(f.name, moduleText).toBinary({}).buffer;
   return instantiate(binaryWasm)
       .then((instance) => instance.exports[f.name]);
@@ -217,6 +218,9 @@ function emitLiteral(parse) {
 }
 dispatch['Literal'] = emitLiteral;
 
+////////////////////////////////////////////////////////////////////////////////
+// structured programming
+
 function emitForStatement(parse) {
   const initializer = genericEmit(parse.init);
   const test = genericEmit(parse.test)[0];
@@ -252,6 +256,36 @@ function emitIfStatement(parse) {
 }
 dispatch['IfStatement'] = emitIfStatement;
 
+function emitWhileStatement(parse) {
+  let test = genericEmit(parse.test)[0];
+  let body = genericEmit(parse.body);
+
+  let result = ["block",
+                ["loop",
+                 ["if", ["i32.eqz", test],
+                  ["then", ["br", 2]]],
+                 ...body,
+                 ["br", 0]]];
+  return [result];
+}
+dispatch['WhileStatement'] = emitWhileStatement;
+
+function emitDoWhileStatement(parse) {
+  let test = genericEmit(parse.test)[0];
+  let body = genericEmit(parse.body);
+
+  let result = ["block",
+                ["loop",
+                 ...body,
+                 ["if", ["i32.eqz", test],
+                  ["then", ["br", 2]]],
+                 ["br", 0]]];
+  return [result];
+}
+dispatch['DoWhileStatement'] = emitDoWhileStatement;
+
+//////////////////////////////////////////////////////////////////////////////
+
 // Everything is easy here, since all of our lvalues are identifiers
 // for now.
 
@@ -259,14 +293,14 @@ function emitAssignmentExpression(parse) {
   const left = parse.left;
   const name = '$' + left.name;
   const right = genericEmit(parse.right)[0];
+  const result = ['block', ['result', 'i32']];
   if (parse.operator === '=') {
     if (left.type !== 'Identifier') {
       throw new Error('Currently only know how to parse ' +
                       'AssignmentExpression with identifier lvalues');
     }
-    return [['local.set', name, right]];
+    result.push(['local.set', name, right]);
   } else {
-    const result = ['block', ['result', 'i32']];
     const op = binaryOperatorToWasmOp[parse.operator.slice(0, -1)];
 
     if (op === undefined) {
@@ -278,10 +312,10 @@ function emitAssignmentExpression(parse) {
                       'AssignmentExpression with identifier lvalues');
     }
 
-    result.push(['local.set', name, [op, ['local.get', name], right]],
-        ['local.get', name]);
-    return [result];
+    result.push(['local.set', name, [op, ['local.get', name], right]]);
   }
+  result.push(['local.get', name]);
+  return [result];
 }
 
 dispatch['AssignmentExpression'] = emitAssignmentExpression;
@@ -367,3 +401,27 @@ function halfFactorial(n) {
 
 compileIntoWasmFunction(halfFactorial)
     .then((f) => console.log(halfFactorial(10), f(10)));
+
+function factorial2(n) {
+  let result = 1;
+  while (n > 1) {
+    result = result * n;
+    n = n - 1;
+  }
+  return result;
+}
+
+compileIntoWasmFunction(factorial2)
+    .then((f) => console.log(factorial2(10), f(10)));
+
+function factorial3(n) {
+  let result = 1;
+  do {
+    result *= n;
+    n = n - 1;
+  } while (n >= 1);
+  return result;
+}
+
+compileIntoWasmFunction(factorial3)
+    .then((f) => console.log(factorial3(10), f(10)));
