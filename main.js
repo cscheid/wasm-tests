@@ -1,3 +1,6 @@
+import * as acornUtils from './acorn_utils.js';
+import * as wu from './wasm_sexpr_utils.js';
+
 /* global WabtModule, acorn */
 
 // ////////////////////////////////////////////////////////////////////////////
@@ -22,15 +25,23 @@ function compileFromWatURL(url, imports, name) {
       .then((bytes) => instantiate(bytes, imports));
 }
 
+
+// ////////////////////////////////////////////////////////////////////////////
+
 // this compiles a single JavaScript function into a "comparable"
 // function implemented in WebAssembly.
 function compileIntoWasmFunction(f) {
   // we operate on a single function;
   const p = acorn.parse(f.toString()).body[0];
+
+  acornUtils.setParentNodes(p);
   const compiledSExpr = genericEmit(p)[0];
+  acornUtils.clearParentNodes(p);
+
   const moduleSExpr = ['module', compiledSExpr,
     ['export', `"${f.name}"`,
       ['func', '$' + f.name]]];
+
   const moduleText = printSExpr(moduleSExpr);
   console.log(moduleText);
   const binaryWasm = wabt.parseWat(f.name, moduleText).toBinary({}).buffer;
@@ -58,41 +69,6 @@ function printSExpr(sexpr) {
 }
 
 // ////////////////////////////////////////////////////////////////////////////
-// some tree traversal utilities. these walk s-expressions, and not
-// acorn's AST
-
-function isLocalDecl(decl) {
-  return Array.isArray(decl) && decl[0] === 'local';
-}
-
-function* yieldLocalDecls(decls) {
-  for (let i = 0; i < decls.length; ++i) {
-    const decl = decls[i];
-    if (isLocalDecl(decl)) {
-      yield decl;
-    } else if (Array.isArray(decl)) {
-      yield* yieldLocalDecls(decl);
-    }
-  }
-}
-
-function skipLocalDecls(decls) {
-  const result = [];
-  for (let i = 0; i < decls.length; ++i) {
-    const decl = decls[i];
-    if (isLocalDecl(decl)) {
-      continue;
-    }
-    if (Array.isArray(decl)) {
-      result.push(skipLocalDecls(decl));
-    } else {
-      result.push(decl);
-    }
-  }
-  return result;
-}
-
-// ////////////////////////////////////////////////////////////////////////////
 // just your standard syntax-directed thing, due to webassembly's sweet
 // s-expr syntax
 // we assume that we only operate on i32s for now.
@@ -108,21 +84,65 @@ function genericEmit(parse) {
   return dispatch[parse.type](parse);
 }
 
+// patch branches to specific labels
+// note - this mutates the sexprs!!
+function patchBranches(sexpr) {
+  wu.walkSExpr(
+      sexpr, function(node, parents) {
+        if (wu.matches(node, ['br', undefined])) {
+          const label = node[1];
+          let height = 0;
+          if (typeof label === 'string') {
+            for (let i = parents.length - 1; i >= 0; --i) {
+              const parent = parents[i];
+              if (wu.matches(parent, ['if']) ||
+                wu.matches(parent, ['block']) ||
+                wu.matches(parent, ['loop'])) {
+                if (parent.label === label) {
+                  node[1] = height;
+                  return;
+                } else {
+                  ++height;
+                }
+              }
+            }
+            throw new Error(`unmatched label ${label} in block`);
+          }
+        }
+      });
+}
+
+// assume for now all functions return values
 function emitFunctionDeclaration(parse) {
   const result = ['func', '$' + parse.id.name];
   result.push(...parse.params.map(
       (param) => ['param', '$' + param.name, 'i32']));
   result.push(['result', 'i32']);
+  result.push(['local', '$$returnValue', 'i32']);
 
-  const bodyDecls = genericEmit(parse.body);
+  const innerBody = ['block', ...genericEmit(parse.body)];
+
+  const bodyDecls = ['block', ['result', 'i32'],
+    innerBody,
+    ['local.get', '$$returnValue']];
+
+  // tag the block so we can patch our returns
+  innerBody.label = 'return-label';
+
+  // //////////////////////////////////////////////////////////////////////////
+  // now we take our bad s-exr WebAssembly IR and turn it into a real
+  // WASM IR
+
+  patchBranches(bodyDecls);
 
   // lift all local declarations to the front
-  for (const decl of yieldLocalDecls(bodyDecls)) {
+  for (const decl of wu.yieldLocalDecls(bodyDecls)) {
     result.push(decl);
   }
-  const withoutDecls = skipLocalDecls(bodyDecls);
+  const withoutDecls = wu.skipLocalDecls(bodyDecls);
 
-  result.push(...withoutDecls);
+  result.push(wu.skipLocalDecls(withoutDecls));
+
   return [result];
 }
 dispatch['FunctionDeclaration'] = emitFunctionDeclaration;
@@ -208,7 +228,12 @@ function emitIdentifier(parse) {
 dispatch['Identifier'] = emitIdentifier;
 
 function emitReturnStatement(parse) {
-  return genericEmit(parse.argument);
+  const expr = (parse.argument === null) ?
+      ['i32.const', 0] :
+      genericEmit(parse.argument)[0];
+  return [['block',
+    ['local.set', '$$returnValue', expr],
+    ['br', 'return-label']]];
 }
 dispatch['ReturnStatement'] = emitReturnStatement;
 
@@ -367,16 +392,53 @@ function emitExpressionStatement(parse) {
 
 dispatch['ExpressionStatement'] = emitExpressionStatement;
 
+function emitCallExpression(parse) {
+  const callee = parse.callee;
+  if (callee.type !== 'Identifier') {
+    throw new Error('Currently only know how to call ' +
+                    'immediate function values');
+  }
+  const wuArgs = parse.arguments.map((arg) => genericEmit(arg)[0]);
+  return [['call', '$' + callee.name, ...wuArgs]];
+}
+dispatch['CallExpression'] = emitCallExpression;
+
+function emitConditionalExpression(parse) {
+  // only support i32 for now..
+
+  const test = parse.test;
+  const consequent = parse.consequent;
+  const alternate = parse.alternate;
+
+  return [['if', ['result', 'i32'], genericEmit(test)[0],
+    ['then', genericEmit(consequent)[0]],
+    ['else', genericEmit(alternate)[0]]]];
+}
+dispatch['ConditionalExpression'] = emitConditionalExpression;
+
 // ////////////////////////////////////////////////////////////////////////////
+
+function testWasmCompilation(f, cases) {
+  compileIntoWasmFunction(f)
+      .then((wasmF) => {
+        cases.forEach((testCase) => {
+          const jsResult = f(...testCase);
+          const wasmResult = wasmF(...testCase);
+          if (wasmResult !== jsResult) {
+            throw new Error(`function ${f.name} miscompiled: ` +
+                          `test case ${String(testCase)} has mismatched ` +
+                          `results ${jsResult} and ${wasmResult}.`);
+          }
+        });
+      });
+}
 
 // let's assume that we only operate on i32s for now.
 function foo(a, b) {
   const x = a * b;
   return b + x * 3 - a;
 }
-
-compileIntoWasmFunction(foo)
-    .then((f) => console.log(foo(2, 3), f(2, 3)));
+// testWasmCompilation(foo, [[2, 3]]);
 
 function factorial(n) {
   let result = 1;
@@ -385,9 +447,7 @@ function factorial(n) {
   }
   return result;
 }
-
-compileIntoWasmFunction(factorial)
-    .then((f) => console.log(factorial(10), f(10)));
+// testWasmCompilation(factorial, [[10]]);
 
 function halfFactorial(n) {
   let result = 1;
@@ -399,8 +459,8 @@ function halfFactorial(n) {
   return result;
 }
 
-compileIntoWasmFunction(halfFactorial)
-    .then((f) => console.log(halfFactorial(10), f(10)));
+// compileIntoWasmFunction(halfFactorial)
+//     .then((f) => console.log(halfFactorial(10), f(10)));
 
 function factorial2(n) {
   let result = 1;
@@ -411,8 +471,8 @@ function factorial2(n) {
   return result;
 }
 
-compileIntoWasmFunction(factorial2)
-    .then((f) => console.log(factorial2(10), f(10)));
+// compileIntoWasmFunction(factorial2)
+//     .then((f) => console.log(factorial2(10), f(10)));
 
 function factorial3(n) {
   let result = 1;
@@ -423,5 +483,36 @@ function factorial3(n) {
   return result;
 }
 
-compileIntoWasmFunction(factorial3)
-    .then((f) => console.log(factorial3(10), f(10)));
+// compileIntoWasmFunction(factorial3)
+//     .then((f) => console.log(factorial3(10), f(10)));
+
+function factorial4(n) {
+  if (n < 3) {
+    return n;
+  } else {
+    return n * factorial4(n-1);
+  }
+}
+// testWasmCompilation(factorial4, [[10]]);
+
+function factorial5(n) {
+  return (n < 3) ? n : n * factorial5(n-1);
+}
+testWasmCompilation(factorial5, [[10]]);
+
+// similar pattern to factorial4, but if has a short-circuiting return
+function fib(n) {
+  if (n <= 1) {
+    return n;
+  }
+  return fib(n-1) + fib(n-2);
+}
+testWasmCompilation(fib, [[2], [3], [8]]);
+
+// compileIntoWasmFunction(factorial3)
+//     .then((f) => console.log(factorial3(10), f(10)));
+
+// ////////////////////////////////////////////////////////////////////////////
+
+// compileFromWatURL("test1.wat")
+//   .then(instance => console.log(instance.exports.test()));
